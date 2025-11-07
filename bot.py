@@ -7,14 +7,50 @@
 # Star, fork, enjoy!
 
 import os
-import requests
-import cloudscraper
-import lyricsgenius
+import time
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from requests.exceptions import Timeout, HTTPError
 from pyrogram.errors import MessageTooLong
 from config import Config
+
+# Import cloudscraper BEFORE lyricsgenius
+import cloudscraper
+import lyricsgenius
+from lyricsgenius.api.base import BaseEndpoint
+
+# Monkey patch lyricsgenius to use cloudscraper for requests
+original_make_request = BaseEndpoint._make_request
+
+def patched_make_request(self, path, params_=None, public_api=False):
+    """Patched version of _make_request that handles Cloudflare"""
+    scraper = cloudscraper.create_scraper()
+    
+    url = "https://api.genius.com" + path if public_api else path
+    
+    try:
+        response = scraper.get(
+            url,
+            params=params_,
+            timeout=10,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        )
+        
+        if response.status_code not in [200, 204]:
+            raise AssertionError(
+                f"Unexpected response status code: {response.status_code}. "
+                f"Expected 200 or 204. Response body: {response.text[:500]}"
+            )
+        
+        return response.json() if response.text else {}
+    
+    except Exception as e:
+        raise Exception(f"Request failed: {str(e)}")
+
+# Apply the monkey patch
+BaseEndpoint._make_request = patched_make_request
 
 bot = Client(
     "bot",
@@ -23,18 +59,13 @@ bot = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-# Initialize Genius with cloudscraper to bypass Cloudflare
-scraper = cloudscraper.create_scraper()
+# Initialize Genius normally
 GENIUS = lyricsgenius.Genius(Config.TOKEN, timeout=10)
-GENIUS.session = scraper
 
 # Store lyrics data globally
 TITLE = None
 ARTISTE = None
 TEXT = None
-INLINE_TITLE = None
-INLINE_ARTISTE = None
-INLINE_TEXT = None
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -130,7 +161,6 @@ async def lyric_get(bot, message):
 
 @bot.on_inline_query()
 async def inlinequery(client, inline_query):
-    global INLINE_TITLE, INLINE_ARTISTE, INLINE_TEXT
     answer = []
     
     try:
@@ -178,7 +208,9 @@ async def inlinequery(client, inline_query):
                 INLINE_ARTISTE = INLINE_LYRICS.artist
                 INLINE_TEXT = INLINE_LYRICS.lyrics
                 
-                response_text = f"**🎶 Lyrics Result**\n\n🎶 **Song:** {INLINE_TITLE}\n🎙️ **Artist:** {INLINE_ARTISTE}\n\n`{INLINE_TEXT[:1000]}...`" if len(INLINE_TEXT) > 1000 else f"**🎶 Lyrics Result**\n\n🎶 **Song:** {INLINE_TITLE}\n🎙️ **Artist:** {INLINE_ARTISTE}\n\n`{INLINE_TEXT}`"
+                # Truncate if too long
+                display_text = INLINE_TEXT[:1000] + "..." if len(INLINE_TEXT) > 1000 else INLINE_TEXT
+                response_text = f"**🎶 Lyrics Result**\n\n🎶 **Song:** {INLINE_TITLE}\n🎙️ **Artist:** {INLINE_ARTISTE}\n\n`{display_text}`"
                 
                 answer.append(
                     InlineQueryResultArticle(
@@ -202,9 +234,9 @@ async def inlinequery(client, inline_query):
                     results=[
                         InlineQueryResultArticle(
                             title="❌ Error occurred",
-                            description=f"Could not fetch lyrics: {str(e)[:50]}",
+                            description=f"Could not fetch lyrics",
                             input_message_content=InputTextMessageContent(
-                                f"❌ Error: {str(e)[:100]}"
+                                f"❌ Error: Could not fetch lyrics. Try again later."
                             )
                         )
                     ]
