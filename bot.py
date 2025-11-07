@@ -8,6 +8,7 @@
 
 import os
 import requests
+from bs4 import BeautifulSoup
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from pyrogram.errors import MessageTooLong
@@ -25,168 +26,183 @@ TITLE = None
 ARTISTE = None
 TEXT = None
 
-# Session for requests with timeout
+# Session for requests
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
 
 
-def search_musixmatch(song_name):
+def search_azlyrics(song_name):
     """
-    Search lyrics using Musixmatch API (fast, reliable, no authentication needed)
+    Search and scrape lyrics from AZLyrics.com (no authentication, very reliable)
     """
     try:
-        print(f"Searching Musixmatch for: {song_name}")
+        print(f"Searching AZLyrics for: {song_name}")
         
-        # Musixmatch search endpoint
-        url = "https://www.musixmatch.com/ws/1.1/track.search"
-        params = {
-            'q_track': song_name,
-            'apikey': '523e41434d2e32383833373731616666666666666666363966613662666536',  # Public API key
-            'format': 'json',
-            's_track_rating': 'desc'
-        }
+        # Search on AZLyrics
+        search_url = "https://www.azlyrics.com/search.php"
+        params = {'q': song_name}
         
-        response = session.get(url, params=params, timeout=8)
+        response = session.get(search_url, params=params, timeout=10)
         response.raise_for_status()
         
-        data = response.json()
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        if data.get('message', {}).get('body', {}).get('track_list'):
-            track = data['message']['body']['track_list'][0]['track']
-            
-            title = track.get('track_name', 'Unknown')
-            artist = track.get('artist_name', 'Unknown')
-            
-            # Get full lyrics
-            track_id = track.get('track_id')
-            if track_id:
-                lyrics_url = "https://www.musixmatch.com/ws/1.1/track.lyrics.get"
-                lyrics_params = {
-                    'track_id': track_id,
-                    'apikey': '523e41434d2e32383833373731616666666666666666363966613662666536'
-                }
-                
-                lyrics_response = session.get(lyrics_url, params=lyrics_params, timeout=8)
-                if lyrics_response.status_code == 200:
-                    lyrics_data = lyrics_response.json()
-                    if lyrics_data.get('message', {}).get('body', {}).get('lyrics'):
-                        lyrics_text = lyrics_data['message']['body']['lyrics']['lyrics_body']
-                        
+        # Find the first song result
+        song_link = soup.find('a', href=lambda x: x and x.startswith('/lyrics/'))
+        
+        if not song_link:
+            return None
+        
+        song_url = 'https://www.azlyrics.com' + song_link['href']
+        song_title = song_link.text.strip()
+        
+        # Extract artist from the link context
+        song_text = song_link.text.split(' - ')
+        if len(song_text) >= 2:
+            artist = song_text[0].strip()
+            title = song_text[1].strip()
+        else:
+            artist = 'Unknown'
+            title = song_title
+        
+        print(f"Found: {artist} - {title}")
+        
+        # Get the actual lyrics page
+        lyrics_response = session.get(song_url, timeout=10)
+        lyrics_response.raise_for_status()
+        
+        lyrics_soup = BeautifulSoup(lyrics_response.content, 'html.parser')
+        
+        # Find lyrics div (AZLyrics uses specific structure)
+        lyrics_div = lyrics_soup.find('div', class_='col-xs-12 col-lg-8')
+        
+        if not lyrics_div:
+            # Alternative search for lyrics
+            all_divs = lyrics_soup.find_all('div')
+            for div in all_divs:
+                text = div.get_text()
+                if len(text) > 500 and 'ad' not in text.lower():
+                    lyrics_text = text.strip()
+                    if lyrics_text and len(lyrics_text) > 100:
                         return {
                             'title': title,
                             'artist': artist,
                             'lyrics': lyrics_text
                         }
+            return None
         
-        return None
-    
-    except Exception as e:
-        print(f"Musixmatch Error: {str(e)}")
-        return None
-
-
-def search_azlyrics_api(song_name):
-    """
-    Search using a free lyrics API that works well
-    """
-    try:
-        print(f"Searching Lyrics API for: {song_name}")
+        # Extract text and clean it
+        lyrics_text = lyrics_div.get_text(separator='\n')
+        lyrics_text = '\n'.join([line.strip() for line in lyrics_text.split('\n') if line.strip()])
         
-        # Using lyrics-api.com (completely free, no auth needed)
-        url = f"https://api.lyrics-api.com/search"
-        params = {
-            'query': song_name,
-            'limit': 1
-        }
+        # Remove common ad text
+        lyrics_text = lyrics_text.replace('[ad]', '').replace('[Ad]', '')
+        lyrics_text = '\n'.join([line for line in lyrics_text.split('\n') if line.strip()])
         
-        response = session.get(url, params=params, timeout=8)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if data and len(data) > 0:
-            song = data[0]
-            title = song.get('title', 'Unknown')
-            artist = song.get('artist', 'Unknown')
-            lyrics = song.get('lyrics', '')
-            
-            if lyrics:
-                return {
-                    'title': title,
-                    'artist': artist,
-                    'lyrics': lyrics
-                }
-        
-        return None
-    
-    except Exception as e:
-        print(f"Lyrics API Error: {str(e)}")
-        return None
-
-
-def search_song_lyrics(song_name):
-    """
-    Try alternative API
-    """
-    try:
-        print(f"Searching song-lyrics.com for: {song_name}")
-        
-        # Clean song name for URL
-        clean_name = song_name.lower().replace(' ', '-')
-        url = f"https://song-lyrics-api.herokuapp.com/?song={song_name}"
-        
-        response = session.get(url, timeout=8)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if data and 'lyrics' in data:
+        if lyrics_text and len(lyrics_text) > 50:
             return {
-                'title': song_name,
-                'artist': data.get('artist', 'Unknown'),
-                'lyrics': data['lyrics']
+                'title': title,
+                'artist': artist,
+                'lyrics': lyrics_text
             }
         
         return None
     
     except Exception as e:
-        print(f"Song Lyrics API Error: {str(e)}")
+        print(f"AZLyrics Error: {str(e)}")
+        return None
+
+
+def search_genius_scrape(song_name):
+    """
+    Scrape lyrics from Genius.com directly (bypasses API)
+    """
+    try:
+        print(f"Searching Genius (scrape) for: {song_name}")
+        
+        # Use Google to find Genius URL
+        search_url = "https://www.google.com/search"
+        params = {'q': f'site:genius.com {song_name} lyrics'}
+        
+        response = session.get(search_url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Find Genius link
+        genius_link = None
+        for link in soup.find_all('a'):
+            href = link.get('href', '')
+            if 'genius.com' in href and 'lyrics' in href:
+                genius_link = href
+                break
+        
+        if not genius_link:
+            return None
+        
+        print(f"Found Genius URL: {genius_link}")
+        
+        # Clean URL
+        if '/url?q=' in genius_link:
+            genius_link = genius_link.split('/url?q=')[1].split('&')[0]
+        
+        # Get the lyrics page
+        lyrics_response = session.get(genius_link, timeout=10)
+        lyrics_response.raise_for_status()
+        
+        lyrics_soup = BeautifulSoup(lyrics_response.content, 'html.parser')
+        
+        # Extract title and artist
+        h1 = lyrics_soup.find('h1')
+        if h1:
+            title_text = h1.get_text().strip()
+        else:
+            title_text = song_name
+        
+        # Extract lyrics
+        lyrics_divs = lyrics_soup.find_all('div', {'data-lyrics-container': 'true'})
+        
+        if lyrics_divs:
+            lyrics_text = '\n'.join([div.get_text(separator='\n') for div in lyrics_divs])
+            return {
+                'title': title_text.split(' by ')[0] if ' by ' in title_text else title_text,
+                'artist': title_text.split(' by ')[-1] if ' by ' in title_text else 'Unknown',
+                'lyrics': lyrics_text
+            }
+        
+        return None
+    
+    except Exception as e:
+        print(f"Genius Scrape Error: {str(e)}")
         return None
 
 
 def get_lyrics(song_name):
     """
-    Get lyrics using multiple sources as fallback
+    Get lyrics using web scraping
     """
     if not song_name or song_name.strip() == "":
         return None
     
     song_name = song_name.strip()
     
-    # Try multiple APIs in order of reliability
     print(f"\n🔍 Attempting to fetch lyrics for: {song_name}")
     
-    # First try: Musixmatch (fastest, most reliable)
-    result = search_musixmatch(song_name)
+    # Try AZLyrics first (most reliable, no auth needed)
+    result = search_azlyrics(song_name)
     if result:
-        print(f"✅ Found on Musixmatch!")
+        print(f"✅ Found on AZLyrics!")
         return result
     
-    # Second try: Lyrics API
-    result = search_azlyrics_api(song_name)
+    # Try Genius scraping
+    result = search_genius_scrape(song_name)
     if result:
-        print(f"✅ Found on Lyrics API!")
+        print(f"✅ Found on Genius!")
         return result
     
-    # Third try: Song Lyrics API
-    result = search_song_lyrics(song_name)
-    if result:
-        print(f"✅ Found on Song Lyrics API!")
-        return result
-    
-    print(f"❌ No lyrics found on any API")
+    print(f"❌ No lyrics found")
     return None
 
 
