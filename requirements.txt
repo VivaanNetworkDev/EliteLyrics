@@ -1,2 +1,5 @@
 pyrogram
-lyricsgenius
+lyricsgenius>=3.7.0
+cloudscraper
+requests
+tgcrypto
