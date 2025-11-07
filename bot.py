@@ -2,11 +2,13 @@
 # You are free to use this code in any of your project, but you MUST include the following in your README.md (Copy & paste)
 # ##Credits - [EliteLyrics](https://github.com/VivaanNetworkDev/EliteLyrics)
 
-# Read GNU General Public License v3.0: https://github.com/VivaanNetworkDev/EliteLyrics/blob/mai/LICENSE
+# Read GNU General Public License v3.0: [https://github.com/VivaanNetworkDev/EliteLyrics/blob/mai/LICENSE](https://github.com/VivaanNetworkDev/EliteLyrics/blob/mai/LICENSE)
 # Don't forget to follow github.com/VivaanNetworkDev because I am doing these things for free and open source
 # Star, fork, enjoy!
 
 import os
+import requests
+import cloudscraper
 import lyricsgenius
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
@@ -21,115 +23,200 @@ bot = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-GENIUS = lyricsgenius.Genius(Config.TOKEN)
+# Initialize Genius with cloudscraper to bypass Cloudflare
+scraper = cloudscraper.create_scraper()
+GENIUS = lyricsgenius.Genius(Config.TOKEN, timeout=10)
+GENIUS.session = scraper
+
+# Store lyrics data globally
+TITLE = None
+ARTISTE = None
+TEXT = None
+INLINE_TITLE = None
+INLINE_ARTISTE = None
+INLINE_TEXT = None
 
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start(bot, message):
-    await bot.send_message(message.chat.id, f"Hello **{message.from_user.first_name}**!!\n\nWelcome to Lyrics bot."
-                                            f"You can get lyrics of any song which is on Genius.com using this bot. Just"
-                                            f" send the name of the song that you want to get lyrics. This is"
-                                            f" quite simple.", reply_markup=InlineKeyboardMarkup(
-        [
+    await bot.send_message(
+        message.chat.id,
+        f"Hello **{message.from_user.first_name}**!!\n\n"
+        f"Welcome to Elite Lyrics Bot 🎵\n\n"
+        f"You can get lyrics of any song which is on Genius.com using this bot. "
+        f"Just send the name of the song that you want to get lyrics for.\n\n"
+        f"This is quite simple!",
+        reply_markup=InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("🔍Search inline...", switch_inline_query_current_chat="")
+                [
+                    InlineKeyboardButton("🔍 Search inline...", switch_inline_query_current_chat="")
+                ]
             ]
-        ]
-    ))
+        )
+    )
 
 
 @bot.on_message(filters.text & filters.private)
 async def lyric_get(bot, message):
+    global TITLE, ARTISTE, TEXT
+    
     try:
-        m = await message.reply(
-            "🔍Searching..."
-        )
-        song_name = message.text
-        LYRICS = GENIUS.search_song(song_name)
-        if LYRICS is None:
-            await m.edit_text(
-                "❌Oops\nFound no result"
-            )
-        global TITLE
-        global ARTISTE
-        global TEXT
-        TITLE = LYRICS.title
-        ARTISTE = LYRICS.artist
-        TEXT = LYRICS.lyrics
+        m = await message.reply("🔍 Searching...")
+        song_name = message.text.strip()
+        
+        if not song_name:
+            await m.edit_text("❌ Please provide a song name")
+            return
+        
+        try:
+            print(f"Searching for: {song_name}")
+            LYRICS = GENIUS.search_song(song_name)
+            
+            if LYRICS is None:
+                await m.edit_text("❌ Oops!\nNo results found for this song.")
+                return
+            
+            TITLE = LYRICS.title
+            ARTISTE = LYRICS.artist
+            TEXT = LYRICS.lyrics
+            
+            # Prepare the response
+            response_text = f"🎶 **Song Name:** {TITLE}\n🎙️ **Artist:** {ARTISTE}\n\n`{TEXT}`"
+            
+            # Try to send as message first
+            try:
+                await m.edit_text(
+                    response_text,
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton("🔍 Search again...", switch_inline_query_current_chat="")
+                            ]
+                        ]
+                    )
+                )
+            except MessageTooLong:
+                # If message is too long, send as file
+                os.makedirs('downloads', exist_ok=True)
+                file_path = f'downloads/{TITLE}.txt'
+                
+                with open(file_path, 'w', encoding='utf-8') as file:
+                    file.write(f'{TITLE}\n{ARTISTE}\n\n{TEXT}')
+                
+                await m.edit_text("📄 Lyrics sent as a text file (too long to display)")
+                
+                await bot.send_document(
+                    message.chat.id,
+                    document=file_path,
+                    caption=f"🎶 **{TITLE}**\n🎙️ **{ARTISTE}**"
+                )
+                
+                # Clean up
+                os.remove(file_path)
+        
+        except Exception as e:
+            print(f"Error searching for lyrics: {str(e)}")
+            await m.edit_text(f"❌ Error: Could not fetch lyrics\n\nDetails: {str(e)[:100]}")
+    
     except Timeout:
-        pass
+        await message.reply("⏱️ Request timed out. Please try again.")
     except HTTPError as https_e:
-        print(https_e)
-    try:
-        await m.edit_text(
-            f"🎶Song Name: **{TITLE}**\n🎙️Artiste: **{ARTISTE}**\n\n`{TEXT}`", reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("🔍Search for lyrics...", switch_inline_query_current_chat="")
-                    ]
-                ]
-            )
-        )
-    except MessageTooLong:
-        with open(f'downloads/{TITLE}.txt', 'w') as file:
-            file.write(f'{TITLE}\n{ARTISTE}\n\n{TEXT}')
-            await m.edit_text(
-                "Changed into a text file because the text is too long..."
-            )
-            await bot.send_document(message.chat.id, document=f'downloads/{TITLE}.txt', caption=f'\n{TITLE}\n{ARTISTE}')
-            os.remove(f'downloads/{TITLE}.txt')
+        print(f"HTTP Error: {https_e}")
+        await message.reply(f"❌ HTTP Error occurred: {str(https_e)[:100]}")
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        await message.reply(f"❌ An unexpected error occurred: {str(e)[:100]}")
 
 
 @bot.on_inline_query()
 async def inlinequery(client, inline_query):
+    global INLINE_TITLE, INLINE_ARTISTE, INLINE_TEXT
     answer = []
-    if inline_query.query == "":
-        await inline_query.answer(
-            results=[
-
-                InlineQueryResultArticle(
-                    title="Search to get lyrics...",
-                    description="Lyrics bot",
-                    reply_markup=InlineKeyboardMarkup(
-                        [
+    
+    try:
+        if inline_query.query == "":
+            await inline_query.answer(
+                results=[
+                    InlineQueryResultArticle(
+                        title="🔍 Search for lyrics...",
+                        description="Type a song name to search for lyrics",
+                        reply_markup=InlineKeyboardMarkup(
                             [
-                                InlineKeyboardButton("🔍Search for Lyrics..", switch_inline_query_current_chat="")
+                                [
+                                    InlineKeyboardButton("🔍 Search for lyrics...", switch_inline_query_current_chat="")
+                                ]
                             ]
+                        ),
+                        input_message_content=InputTextMessageContent(
+                            "💬 Search for lyrics inline using this bot!"
+                        )
+                    )
+                ]
+            )
+        else:
+            search_query = inline_query.query.strip()
+            print(f"Inline search for: {search_query}")
+            
+            try:
+                INLINE_LYRICS = GENIUS.search_song(search_query)
+                
+                if INLINE_LYRICS is None:
+                    await inline_query.answer(
+                        results=[
+                            InlineQueryResultArticle(
+                                title="❌ No results found",
+                                description=f"Could not find lyrics for '{search_query}'",
+                                input_message_content=InputTextMessageContent(
+                                    f"❌ No lyrics found for '{search_query}'"
+                                )
+                            )
                         ]
-                    ),
-                    input_message_content=InputTextMessageContent(
-                        "Search for lyrics inline..."
+                    )
+                    return
+                
+                INLINE_TITLE = INLINE_LYRICS.title
+                INLINE_ARTISTE = INLINE_LYRICS.artist
+                INLINE_TEXT = INLINE_LYRICS.lyrics
+                
+                response_text = f"**🎶 Lyrics Result**\n\n🎶 **Song:** {INLINE_TITLE}\n🎙️ **Artist:** {INLINE_ARTISTE}\n\n`{INLINE_TEXT[:1000]}...`" if len(INLINE_TEXT) > 1000 else f"**🎶 Lyrics Result**\n\n🎶 **Song:** {INLINE_TITLE}\n🎙️ **Artist:** {INLINE_ARTISTE}\n\n`{INLINE_TEXT}`"
+                
+                answer.append(
+                    InlineQueryResultArticle(
+                        title=INLINE_TITLE,
+                        description=f"by {INLINE_ARTISTE}",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton("❌ Wrong result?", switch_inline_query_current_chat=search_query),
+                                    InlineKeyboardButton("🔍 Search again", switch_inline_query_current_chat="")
+                                ]
+                            ]
+                        ),
+                        input_message_content=InputTextMessageContent(response_text)
                     )
                 )
-            ]
-        )
-    else:
-        INLINE_SONG = inline_query.query
-        print(INLINE_SONG)
-        INLINE_LYRICS = GENIUS.search_song(INLINE_SONG)
-        INLINE_TITLE = INLINE_LYRICS.title
-        INLINE_ARTISTE = INLINE_LYRICS.artist
-        INLINE_TEXT = INLINE_LYRICS.lyrics
-        answer.append(
-            InlineQueryResultArticle(
-                title=INLINE_TITLE,
-                description=INLINE_ARTISTE,
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton("❌Wrong result?", switch_inline_query_current_chat=INLINE_SONG),
-                            InlineKeyboardButton("🔍Search again..", switch_inline_query_current_chat="")
-                        ]
+            
+            except Exception as e:
+                print(f"Error in inline search: {str(e)}")
+                await inline_query.answer(
+                    results=[
+                        InlineQueryResultArticle(
+                            title="❌ Error occurred",
+                            description=f"Could not fetch lyrics: {str(e)[:50]}",
+                            input_message_content=InputTextMessageContent(
+                                f"❌ Error: {str(e)[:100]}"
+                            )
+                        )
                     ]
-                ),
-                input_message_content=InputTextMessageContent(f"**Inline lyrics result...**\n\n🎶Name: **{INLINE_TITLE}**\n🎙️Artiste: **{INLINE_ARTISTE}**\n\n`{INLINE_TEXT}`")
-            )
-        )
-    await inline_query.answer(
-        results=answer,
-        cache_time=1
-    )
+                )
+                return
+        
+        await inline_query.answer(results=answer, cache_time=1)
+    
+    except Exception as e:
+        print(f"Inline query error: {str(e)}")
 
 
-print("Lyric bot is online")
-bot.run()
+if __name__ == "__main__":
+    print("🎵 Elite Lyrics Bot is starting...")
+    bot.run()
