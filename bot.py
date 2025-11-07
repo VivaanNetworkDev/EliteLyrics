@@ -7,13 +7,11 @@
 # Star, fork, enjoy!
 
 import os
-import json
-import re
+import requests
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from pyrogram.errors import MessageTooLong
 from config import Config
-import cloudscraper
 
 bot = Client(
     "bot",
@@ -22,115 +20,117 @@ bot = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-# Initialize cloudscraper session
-scraper = cloudscraper.create_scraper()
-
 # Store lyrics data globally
 TITLE = None
 ARTISTE = None
 TEXT = None
 
+# Session for requests
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+})
 
-def get_lyrics_from_genius(song_name):
+
+def search_lyrics_api(artist, song):
     """
-    Fetch lyrics directly from Genius.com using cloudscraper to bypass Cloudflare
+    Search lyrics using LyricsOVH API (no Cloudflare blocking)
     """
     try:
-        # Search for the song
-        search_url = "https://genius.com/api/search/multi"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        print(f"Searching LyricsOVH for: {artist} - {song}")
+        url = f"https://api.lyrics.ovh/v1/{artist}/{song}"
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
         
-        params = {
-            'q': song_name
-        }
+        data = response.json()
         
-        print(f"Searching for: {song_name}")
-        search_response = scraper.get(search_url, params=params, headers=headers, timeout=10)
-        search_response.raise_for_status()
-        
-        search_data = search_response.json()
-        
-        # Extract song information from search results
-        if 'response' not in search_data or 'hits' not in search_data['response']:
-            return None
-        
-        hits = search_data['response']['hits']
-        if not hits:
-            return None
-        
-        # Get the first result
-        first_hit = hits[0]
-        if 'result' not in first_hit:
-            return None
-        
-        song_data = first_hit['result']
-        song_url = song_data.get('url')
-        
-        if not song_url:
-            return None
-        
-        print(f"Found song URL: {song_url}")
-        
-        # Fetch the lyrics page
-        page_response = scraper.get(song_url, headers=headers, timeout=10)
-        page_response.raise_for_status()
-        
-        # Extract lyrics from the page using regex
-        # Look for the JSON-LD structured data
-        json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
-        json_ld_matches = re.findall(json_ld_pattern, page_response.text, re.DOTALL)
-        
-        lyrics_text = None
-        
-        # Try to extract from JSON-LD first
-        for match in json_ld_matches:
-            try:
-                data = json.loads(match)
-                if 'text' in data:
-                    lyrics_text = data['text']
-                    break
-            except json.JSONDecodeError:
-                continue
-        
-        # If not found in JSON-LD, extract from page content
-        if not lyrics_text:
-            # Extract lyrics div content
-            lyrics_pattern = r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>'
-            matches = re.findall(lyrics_pattern, page_response.text, re.DOTALL)
-            
-            if matches:
-                # Clean up HTML tags
-                lyrics_html = ''.join(matches)
-                lyrics_text = re.sub(r'<[^>]+>', '', lyrics_html)
-                lyrics_text = re.sub(r'&nbsp;', ' ', lyrics_text)
-                lyrics_text = re.sub(r'&#x27;', "'", lyrics_text)
-        
-        # Extract song title and artist
-        title_pattern = r'"trackName":"([^"]+)"'
-        artist_pattern = r'"byArtist":"name":"([^"]+)"'
-        
-        title_match = re.search(title_pattern, page_response.text)
-        artist_match = re.search(artist_pattern, page_response.text)
-        
-        title = title_match.group(1) if title_match else song_data.get('title', 'Unknown')
-        artist = artist_match.group(1) if artist_match else song_data.get('primary_artist', {}).get('name', 'Unknown')
-        
-        if lyrics_text:
-            # Clean up the lyrics
-            lyrics_text = lyrics_text.strip()
+        if 'lyrics' in data and data['lyrics']:
             return {
-                'title': title,
+                'title': song,
                 'artist': artist,
-                'lyrics': lyrics_text
+                'lyrics': data['lyrics']
             }
-        
         return None
     
     except Exception as e:
-        print(f"Error fetching lyrics: {str(e)}")
+        print(f"LyricsOVH Error: {str(e)}")
         return None
+
+
+def parse_song_input(song_name):
+    """
+    Parse song name to extract artist and song
+    Format: "artist - song" or just "song"
+    """
+    if ' - ' in song_name:
+        parts = song_name.split(' - ', 1)
+        return parts[0].strip(), parts[1].strip()
+    else:
+        # Try to search with just the song name
+        return "", song_name.strip()
+
+
+def search_lyrics_genius_api(song_name):
+    """
+    Try Genius API with proper token if available
+    """
+    try:
+        if not hasattr(Config, 'TOKEN') or not Config.TOKEN:
+            return None
+        
+        print(f"Searching Genius API for: {song_name}")
+        
+        headers = {
+            'Authorization': f'Bearer {Config.TOKEN}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        url = "https://api.genius.com/search"
+        params = {'q': song_name}
+        
+        response = session.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data['response']['hits']:
+            hit = data['response']['hits'][0]
+            return {
+                'title': hit['result']['title'],
+                'artist': hit['result']['primary_artist']['name'],
+                'lyrics': "Full lyrics available at: " + hit['result']['url']  # Can't scrape due to Cloudflare
+            }
+        return None
+    
+    except Exception as e:
+        print(f"Genius API Error: {str(e)}")
+        return None
+
+
+def get_lyrics(song_name):
+    """
+    Get lyrics using multiple sources as fallback
+    """
+    # Try parsing artist - song format
+    artist, song = parse_song_input(song_name)
+    
+    # First try: LyricsOVH (most reliable, no Cloudflare)
+    if artist:
+        result = search_lyrics_api(artist, song)
+        if result:
+            return result
+    
+    # Try just the song name with common artists
+    result = search_lyrics_api("", song)
+    if result:
+        return result
+    
+    # Second try: Genius API with token
+    result = search_lyrics_genius_api(song_name)
+    if result:
+        return result
+    
+    return None
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -140,7 +140,10 @@ async def start(bot, message):
         f"Hello **{message.from_user.first_name}**!!\n\n"
         f"Welcome to Elite Lyrics Bot 🎵\n\n"
         f"You can get lyrics of any song using this bot. "
-        f"Just send the name of the song that you want to get lyrics for.\n\n"
+        f"Send the song name or format: **Artist - Song Name**\n\n"
+        f"Examples:\n"
+        f"• `tu mera koi na`\n"
+        f"• `The Weeknd - Blinding Lights`\n\n"
         f"This is quite simple!",
         reply_markup=InlineKeyboardMarkup(
             [
@@ -165,10 +168,16 @@ async def lyric_get(bot, message):
             return
         
         try:
-            result = get_lyrics_from_genius(song_name)
+            result = get_lyrics(song_name)
             
             if result is None:
-                await m.edit_text("❌ Oops!\nNo results found for this song.")
+                await m.edit_text(
+                    "❌ Oops!\n"
+                    "No results found for this song.\n\n"
+                    "Try:\n"
+                    "• Using correct spelling\n"
+                    "• Format: **Artist - Song Name**"
+                )
                 return
             
             TITLE = result['title']
@@ -207,7 +216,8 @@ async def lyric_get(bot, message):
                 )
                 
                 # Clean up
-                os.remove(file_path)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
         
         except Exception as e:
             print(f"Error searching for lyrics: {str(e)}")
@@ -247,7 +257,7 @@ async def inlinequery(client, inline_query):
             print(f"Inline search for: {search_query}")
             
             try:
-                result = get_lyrics_from_genius(search_query)
+                result = get_lyrics(search_query)
                 
                 if result is None:
                     await inline_query.answer(
@@ -293,9 +303,9 @@ async def inlinequery(client, inline_query):
                     results=[
                         InlineQueryResultArticle(
                             title="❌ Error occurred",
-                            description=f"Could not fetch lyrics",
+                            description="Could not fetch lyrics",
                             input_message_content=InputTextMessageContent(
-                                f"❌ Error: Could not fetch lyrics. Try again later."
+                                "❌ Error: Could not fetch lyrics. Try again later."
                             )
                         )
                     ]
