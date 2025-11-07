@@ -74,7 +74,7 @@ async def start(bot, message):
         message.chat.id,
         f"Hello **{message.from_user.first_name}**!!\n\n"
         f"Welcome to Elite Lyrics Bot 🎵\n\n"
-        f"You can get lyrics of any song which is on Genius.com using this bot. "
+        f"You can get lyrics of any song which is on @EliteLyricsBot using this bot. "
         f"Just send the name of the song that you want to get lyrics for.\n\n"
         f"This is quite simple!",
         reply_markup=InlineKeyboardMarkup(
