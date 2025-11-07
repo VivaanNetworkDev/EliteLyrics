@@ -1,0 +1,34 @@
+{
+    "name": "Lyrics bot",
+    "description": "A Telegram Bot that can get lyrics.",
+    "repository": "https://github.com/VivaanNetworkDev/EliteLyrics",
+    "keywords": [
+        "lyrics bot",
+        "pyrogram bot",
+        "lyrics",
+        "Telegram bot"
+    ],
+    "env": {
+        "API_ID": {
+            "description": "Get from my.telegram.org/apps",
+            "required": true
+        },
+        "API_HASH": {
+            "description": "Get from my.telegram.org/apps",
+            "required": true
+        },
+        "BOT_TOKEN": {
+            "description": "Get from Telegram's @BotFather",
+            "required": true
+        },
+        "TOKEN": {
+            "description": "Client access token from Genius.com API CLIENT",
+            "required": true
+        }
+  },
+    "buildpacks": [
+        {
+            "url": "heroku/python"
+        }
+    ]
+}
