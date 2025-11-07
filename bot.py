@@ -7,50 +7,13 @@
 # Star, fork, enjoy!
 
 import os
-import time
+import json
+import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
-from requests.exceptions import Timeout, HTTPError
 from pyrogram.errors import MessageTooLong
 from config import Config
-
-# Import cloudscraper BEFORE lyricsgenius
 import cloudscraper
-import lyricsgenius
-from lyricsgenius.api.base import BaseEndpoint
-
-# Monkey patch lyricsgenius to use cloudscraper for requests
-original_make_request = BaseEndpoint._make_request
-
-def patched_make_request(self, path, params_=None, public_api=False):
-    """Patched version of _make_request that handles Cloudflare"""
-    scraper = cloudscraper.create_scraper()
-    
-    url = "https://api.genius.com" + path if public_api else path
-    
-    try:
-        response = scraper.get(
-            url,
-            params=params_,
-            timeout=10,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-        )
-        
-        if response.status_code not in [200, 204]:
-            raise AssertionError(
-                f"Unexpected response status code: {response.status_code}. "
-                f"Expected 200 or 204. Response body: {response.text[:500]}"
-            )
-        
-        return response.json() if response.text else {}
-    
-    except Exception as e:
-        raise Exception(f"Request failed: {str(e)}")
-
-# Apply the monkey patch
-BaseEndpoint._make_request = patched_make_request
 
 bot = Client(
     "bot",
@@ -59,13 +22,115 @@ bot = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-# Initialize Genius normally
-GENIUS = lyricsgenius.Genius(Config.TOKEN, timeout=10)
+# Initialize cloudscraper session
+scraper = cloudscraper.create_scraper()
 
 # Store lyrics data globally
 TITLE = None
 ARTISTE = None
 TEXT = None
+
+
+def get_lyrics_from_genius(song_name):
+    """
+    Fetch lyrics directly from Genius.com using cloudscraper to bypass Cloudflare
+    """
+    try:
+        # Search for the song
+        search_url = "https://genius.com/api/search/multi"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        params = {
+            'q': song_name
+        }
+        
+        print(f"Searching for: {song_name}")
+        search_response = scraper.get(search_url, params=params, headers=headers, timeout=10)
+        search_response.raise_for_status()
+        
+        search_data = search_response.json()
+        
+        # Extract song information from search results
+        if 'response' not in search_data or 'hits' not in search_data['response']:
+            return None
+        
+        hits = search_data['response']['hits']
+        if not hits:
+            return None
+        
+        # Get the first result
+        first_hit = hits[0]
+        if 'result' not in first_hit:
+            return None
+        
+        song_data = first_hit['result']
+        song_url = song_data.get('url')
+        
+        if not song_url:
+            return None
+        
+        print(f"Found song URL: {song_url}")
+        
+        # Fetch the lyrics page
+        page_response = scraper.get(song_url, headers=headers, timeout=10)
+        page_response.raise_for_status()
+        
+        # Extract lyrics from the page using regex
+        # Look for the JSON-LD structured data
+        json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
+        json_ld_matches = re.findall(json_ld_pattern, page_response.text, re.DOTALL)
+        
+        lyrics_text = None
+        
+        # Try to extract from JSON-LD first
+        for match in json_ld_matches:
+            try:
+                data = json.loads(match)
+                if 'text' in data:
+                    lyrics_text = data['text']
+                    break
+            except json.JSONDecodeError:
+                continue
+        
+        # If not found in JSON-LD, extract from page content
+        if not lyrics_text:
+            # Extract lyrics div content
+            lyrics_pattern = r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>'
+            matches = re.findall(lyrics_pattern, page_response.text, re.DOTALL)
+            
+            if matches:
+                # Clean up HTML tags
+                lyrics_html = ''.join(matches)
+                lyrics_text = re.sub(r'<[^>]+>', '', lyrics_html)
+                lyrics_text = re.sub(r'&nbsp;', ' ', lyrics_text)
+                lyrics_text = re.sub(r'&#x27;', "'", lyrics_text)
+        
+        # Extract song title and artist
+        title_pattern = r'"trackName":"([^"]+)"'
+        artist_pattern = r'"byArtist":"name":"([^"]+)"'
+        
+        title_match = re.search(title_pattern, page_response.text)
+        artist_match = re.search(artist_pattern, page_response.text)
+        
+        title = title_match.group(1) if title_match else song_data.get('title', 'Unknown')
+        artist = artist_match.group(1) if artist_match else song_data.get('primary_artist', {}).get('name', 'Unknown')
+        
+        if lyrics_text:
+            # Clean up the lyrics
+            lyrics_text = lyrics_text.strip()
+            return {
+                'title': title,
+                'artist': artist,
+                'lyrics': lyrics_text
+            }
+        
+        return None
+    
+    except Exception as e:
+        print(f"Error fetching lyrics: {str(e)}")
+        return None
 
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -74,7 +139,7 @@ async def start(bot, message):
         message.chat.id,
         f"Hello **{message.from_user.first_name}**!!\n\n"
         f"Welcome to Elite Lyrics Bot 🎵\n\n"
-        f"You can get lyrics of any song which is on @EliteLyricsBot using this bot. "
+        f"You can get lyrics of any song using this bot. "
         f"Just send the name of the song that you want to get lyrics for.\n\n"
         f"This is quite simple!",
         reply_markup=InlineKeyboardMarkup(
@@ -100,16 +165,15 @@ async def lyric_get(bot, message):
             return
         
         try:
-            print(f"Searching for: {song_name}")
-            LYRICS = GENIUS.search_song(song_name)
+            result = get_lyrics_from_genius(song_name)
             
-            if LYRICS is None:
+            if result is None:
                 await m.edit_text("❌ Oops!\nNo results found for this song.")
                 return
             
-            TITLE = LYRICS.title
-            ARTISTE = LYRICS.artist
-            TEXT = LYRICS.lyrics
+            TITLE = result['title']
+            ARTISTE = result['artist']
+            TEXT = result['lyrics']
             
             # Prepare the response
             response_text = f"🎶 **Song Name:** {TITLE}\n🎙️ **Artist:** {ARTISTE}\n\n`{TEXT}`"
@@ -149,11 +213,6 @@ async def lyric_get(bot, message):
             print(f"Error searching for lyrics: {str(e)}")
             await m.edit_text(f"❌ Error: Could not fetch lyrics\n\nDetails: {str(e)[:100]}")
     
-    except Timeout:
-        await message.reply("⏱️ Request timed out. Please try again.")
-    except HTTPError as https_e:
-        print(f"HTTP Error: {https_e}")
-        await message.reply(f"❌ HTTP Error occurred: {str(https_e)[:100]}")
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         await message.reply(f"❌ An unexpected error occurred: {str(e)[:100]}")
@@ -188,9 +247,9 @@ async def inlinequery(client, inline_query):
             print(f"Inline search for: {search_query}")
             
             try:
-                INLINE_LYRICS = GENIUS.search_song(search_query)
+                result = get_lyrics_from_genius(search_query)
                 
-                if INLINE_LYRICS is None:
+                if result is None:
                     await inline_query.answer(
                         results=[
                             InlineQueryResultArticle(
@@ -204,9 +263,9 @@ async def inlinequery(client, inline_query):
                     )
                     return
                 
-                INLINE_TITLE = INLINE_LYRICS.title
-                INLINE_ARTISTE = INLINE_LYRICS.artist
-                INLINE_TEXT = INLINE_LYRICS.lyrics
+                INLINE_TITLE = result['title']
+                INLINE_ARTISTE = result['artist']
+                INLINE_TEXT = result['lyrics']
                 
                 # Truncate if too long
                 display_text = INLINE_TEXT[:1000] + "..." if len(INLINE_TEXT) > 1000 else INLINE_TEXT
